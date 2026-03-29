@@ -18,12 +18,12 @@ import base64
 import re
 
 # ============ CONFIGURATION ============
-DISCORD_TOKEN = os.environ.get('DISCORD_TOKEN', 'YOUR_BOT_TOKEN')
-ANTHROPIC_API_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
+DISCORD_TOKEN = os.environ.get('DISCORD_TOKEN')
+GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 PORT = int(os.environ.get('PORT', 8000))
 HOST = os.environ.get('HOST', '0.0.0.0')
 # On Render use persistent disk at /data; locally use current dir
-DATA_DIR = os.environ.get('DATA_DIR', '.')
+DATA_DIR = os.environ.get('DATA_DIR')
 os.makedirs(DATA_DIR, exist_ok=True)
 
 # ============ PREDICTOR CLASS ============
@@ -88,10 +88,6 @@ class BloxflipPredictor:
         return patterns
 
     def predict_mines(self, tile_amt: int, mine_count: Optional[int] = None, user_id=None):
-        """
-        Predict which tiles contain mines.
-        mine_count: how many mines the user says are in the game (defaults to tile_amt // 2 if not given)
-        """
         if mine_count is None:
             mine_count = tile_amt // 2
 
@@ -100,7 +96,6 @@ class BloxflipPredictor:
         patterns = self.get_historical_patterns(tile_amt)
         total_games = patterns['total_games']
 
-        # Base probability: each tile has mine_count / tile_amt chance
         base_risk = mine_count / tile_amt
 
         tile_risks = {}
@@ -110,7 +105,6 @@ class BloxflipPredictor:
             if total_games > 0:
                 freq = patterns['frequent_mines'].get(tile, 0)
                 historical_risk = freq / total_games
-                # Blend base and historical
                 weight = min(1.0, total_games / 100)
                 risk = (1 - weight) * base_risk + weight * historical_risk
 
@@ -126,7 +120,6 @@ class BloxflipPredictor:
         predicted_mines = [tile for tile, _ in sorted_tiles[:mine_count]]
         safe_tiles = [tile for tile in range(1, tile_amt + 1) if tile not in predicted_mines]
 
-        # Confidence increases with more data
         confidence = round(min(0.93, 0.45 + (total_games / 300)), 2)
 
         return {
@@ -185,7 +178,6 @@ class BloxflipPredictor:
 
     def record_bet(self, user_id, bet_amount: float, tile_amt: int, mine_count: int,
                    won: bool, payout: float = 0.0):
-        """Track bet history per user for learning bet-size patterns."""
         user_id_str = str(user_id)
         if user_id_str not in self.data['user_stats']:
             self.data['user_stats'][user_id_str] = {
@@ -206,12 +198,10 @@ class BloxflipPredictor:
             'won': won,
             'payout': payout
         })
-        # Keep only last 200 bets
         stats['bets'] = stats['bets'][-200:]
         self.save_data()
 
     def get_bet_insights(self, user_id) -> dict:
-        """Analyse a user's bet history to surface patterns."""
         stats = self.data['user_stats'].get(str(user_id), {})
         bets = stats.get('bets', [])
         if not bets:
@@ -226,7 +216,6 @@ class BloxflipPredictor:
         net = round(total_returned - total_wagered, 2)
         avg_bet = round(total_wagered / total, 2)
 
-        # Best performing mine count
         by_mines = defaultdict(lambda: {'w': 0, 'l': 0})
         for b in bets:
             k = b.get('mines', '?')
@@ -263,7 +252,7 @@ class BloxflipPredictor:
 
 # ============ SCREENSHOT ANALYZER ============
 class ScreenshotAnalyzer:
-    """Uses Claude vision API to read a Bloxflip Mines screenshot."""
+    """Uses Google Gemini (free tier) to read a Bloxflip Mines screenshot."""
 
     SYSTEM_PROMPT = """You are an expert at reading Bloxflip Mines game screenshots.
 Bloxflip Mines is a grid-based game where some tiles hide bombs/mines.
@@ -290,59 +279,58 @@ Return ONLY the JSON object, no markdown, no explanation."""
 
     async def analyze(self, image_bytes: bytes, mime_type: str = "image/png") -> dict:
         if not self.api_key:
-            return {'error': 'ANTHROPIC_API_KEY not set. Add it to your environment variables.'}
+            return {'error': 'GEMINI_API_KEY not set. Add it to your environment variables. Get a free key at aistudio.google.com'}
 
         b64 = base64.standard_b64encode(image_bytes).decode('utf-8')
 
         payload = {
-            "model": "claude-opus-4-6",
-            "max_tokens": 1024,
-            "system": self.SYSTEM_PROMPT,
-            "messages": [
+            "contents": [
                 {
-                    "role": "user",
-                    "content": [
+                    "parts": [
                         {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": mime_type,
+                            "inline_data": {
+                                "mime_type": mime_type,
                                 "data": b64
                             }
                         },
                         {
-                            "type": "text",
-                            "text": "Analyze this Bloxflip Mines screenshot and return the JSON."
+                            "text": self.SYSTEM_PROMPT + "\n\nAnalyze this Bloxflip Mines screenshot and return the JSON."
                         }
                     ]
                 }
-            ]
+            ],
+            "generationConfig": {
+                "temperature": 0.1,
+                "maxOutputTokens": 1024
+            }
         }
+
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={self.api_key}"
 
         async with aiohttp.ClientSession() as session:
             async with session.post(
-                "https://api.anthropic.com/v1/messages",
+                url,
                 json=payload,
-                headers={
-                    "x-api-key": self.api_key,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json"
-                },
+                headers={"Content-Type": "application/json"},
                 timeout=aiohttp.ClientTimeout(total=30)
             ) as resp:
                 if resp.status != 200:
                     text = await resp.text()
-                    return {'error': f'API error {resp.status}: {text[:200]}'}
+                    return {'error': f'Gemini API error {resp.status}: {text[:200]}'}
                 data = await resp.json()
 
-        raw = data['content'][0]['text'].strip()
+        try:
+            raw = data['candidates'][0]['content']['parts'][0]['text'].strip()
+        except (KeyError, IndexError):
+            return {'error': 'Unexpected response structure from Gemini API'}
+
         # Strip markdown fences if present
         raw = re.sub(r'^```[a-z]*\n?', '', raw)
         raw = re.sub(r'\n?```$', '', raw)
         try:
             return json.loads(raw)
         except json.JSONDecodeError:
-            return {'error': f'Could not parse response: {raw[:300]}'}
+            return {'error': f'Could not parse Gemini response: {raw[:300]}'}
 
 
 # ============ FASTAPI WEB SERVER ============
@@ -401,7 +389,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
     z-index:0;
   }
 
-  /* NAV */
   nav {
     position: sticky;
     top: 0;
@@ -436,10 +423,8 @@ HTML_PAGE = r"""<!DOCTYPE html>
   }
   .nav-link:hover, .nav-link.active { color: var(--accent); }
 
-  /* MAIN */
   main { position: relative; z-index: 1; max-width: 1300px; margin: 0 auto; padding: 40px 20px 80px; }
 
-  /* HERO */
   .hero {
     text-align: center;
     padding: 60px 0 50px;
@@ -477,7 +462,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
     line-height: 1.6;
   }
 
-  /* STATS ROW */
   .stats-row {
     display: grid;
     grid-template-columns: repeat(4, 1fr);
@@ -512,11 +496,9 @@ HTML_PAGE = r"""<!DOCTYPE html>
   }
   .stat-label { font-size: 0.78rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-dim); }
 
-  /* TWO COL */
   .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-bottom: 24px; }
   @media(max-width:900px){ .two-col { grid-template-columns: 1fr; } }
 
-  /* PANEL */
   .panel {
     background: var(--surface);
     border: 1px solid var(--border);
@@ -542,7 +524,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
     background: var(--border);
   }
 
-  /* FORM ELEMENTS */
   label { font-size: 0.82rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-dim); display: block; margin-bottom: 6px; }
   input[type=number], select {
     width: 100%;
@@ -563,7 +544,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
     box-shadow: 0 0 0 3px rgba(0,255,180,0.1);
   }
 
-  /* RANGE SLIDER */
   .range-wrap { margin-bottom: 20px; }
   .range-header { display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; }
   .range-val {
@@ -593,7 +573,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
   }
   input[type=range]::-webkit-slider-thumb:hover { transform: scale(1.2); }
 
-  /* BUTTON */
   .btn {
     display: inline-flex;
     align-items: center;
@@ -630,7 +609,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
   }
   .btn-secondary:hover { background: rgba(0,255,180,0.08); }
 
-  /* GRID DISPLAY */
   #grid-container { margin-top: 20px; }
   .mine-grid {
     display: grid;
@@ -681,7 +659,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
   .tile-icon { font-size: 1.1em; }
   .tile-num { font-size: 0.6em; opacity: 0.6; position:absolute; top:3px; left:4px; }
 
-  /* CONFIDENCE BAR */
   .confidence-section { margin-bottom: 20px; }
   .conf-label { display:flex; justify-content:space-between; margin-bottom:6px; }
   .conf-pct {
@@ -705,7 +682,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
     width: 0%;
   }
 
-  /* RESULT LEGEND */
   .legend {
     display:flex;
     gap:20px;
@@ -717,7 +693,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
   .legend-dot.safe { background:var(--safe); box-shadow:0 0 6px rgba(0,255,180,0.5); }
   .legend-dot.mine { background:var(--mine); box-shadow:0 0 6px rgba(255,61,113,0.5); }
 
-  /* PREDICTION SUMMARY */
   .pred-summary {
     display:grid;
     grid-template-columns:1fr 1fr;
@@ -735,7 +710,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
   .pred-stat-val.mine-color { color: var(--mine); }
   .pred-stat-label { font-size:0.75rem; letter-spacing:0.1em; text-transform:uppercase; color:var(--text-dim); margin-top:2px; }
 
-  /* RECENT PREDICTIONS */
   .recent-list { display:flex; flex-direction:column; gap:10px; }
   .recent-item {
     background: var(--surface2);
@@ -758,7 +732,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
     color:var(--accent);
   }
 
-  /* LEADERBOARD */
   .lb-table { width:100%; border-collapse:collapse; }
   .lb-table th {
     font-size:0.72rem;
@@ -780,13 +753,9 @@ HTML_PAGE = r"""<!DOCTYPE html>
   .lb-rank.bronze { color:#cd7f32; }
   .lb-acc { font-family:'Orbitron',sans-serif; font-weight:700; color:var(--accent); }
 
-  /* SECTION */
   .section { margin-bottom:28px; }
-
-  /* EMPTY STATE */
   .empty { text-align:center; padding:30px; color:var(--text-dim); font-size:0.9rem; }
 
-  /* TOAST */
   #toast {
     position:fixed;
     bottom:30px;
@@ -805,7 +774,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
   }
   #toast.show { transform:translateX(-50%) translateY(0); }
 
-  /* SPINNER */
   .spinner {
     display:inline-block;
     width:16px;
@@ -817,7 +785,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
   }
   @keyframes spin { to { transform:rotate(360deg); } }
 
-  /* SECTION TABS */
   .tabs { display:flex; gap:0; margin-bottom:28px; border:1px solid var(--border); border-radius:8px; overflow:hidden; }
   .tab {
     flex:1;
@@ -858,7 +825,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
     <p>Advanced pattern recognition trained on game history. Identify safe tiles with data-driven confidence.</p>
   </section>
 
-  <!-- STATS ROW -->
   <div class="stats-row" id="stats-section">
     <div class="stat-card">
       <div class="stat-val" id="s-total">—</div>
@@ -878,17 +844,14 @@ HTML_PAGE = r"""<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- TABS -->
   <div class="tabs">
     <button class="tab active" onclick="switchTab('predictor')">🎲 Predictor</button>
     <button class="tab" onclick="switchTab('recent')">📋 Recent</button>
     <button class="tab" onclick="switchTab('leaderboard')">🏆 Leaderboard</button>
   </div>
 
-  <!-- PREDICTOR TAB -->
   <div class="tab-panel active" id="tab-predictor" id="predictor-section">
     <div class="two-col" id="predictor-section">
-      <!-- LEFT: Controls -->
       <div class="panel">
         <div class="panel-title">Configure Prediction</div>
 
@@ -918,7 +881,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
           <span id="btn-text">ANALYZE &amp; PREDICT</span>
         </button>
 
-        <!-- Submit results section -->
         <div id="submit-section" style="display:none;margin-top:24px;padding-top:20px;border-top:1px solid var(--border)">
           <div class="panel-title">Submit Results</div>
           <label>Round ID</label>
@@ -929,7 +891,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
         </div>
       </div>
 
-      <!-- RIGHT: Results -->
       <div class="panel">
         <div class="panel-title">Prediction Output</div>
         <div id="prediction-output">
@@ -939,7 +900,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- RECENT TAB -->
   <div class="tab-panel" id="tab-recent">
     <div class="panel">
       <div class="panel-title">Recent Predictions</div>
@@ -949,7 +909,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- LEADERBOARD TAB -->
   <div class="tab-panel" id="tab-leaderboard">
     <div class="panel">
       <div class="panel-title">Leaderboard</div>
@@ -1156,7 +1115,6 @@ function showToast(msg) {
   setTimeout(() => t.classList.remove('show'), 3000);
 }
 
-// Init
 updateSliders();
 loadStats();
 setInterval(loadStats, 10000);
@@ -1173,7 +1131,6 @@ async def root():
 
 @app.get("/health")
 async def health():
-    """Render uses this to check the service is alive."""
     return {"status": "ok", "predictions": len(predictor_instance.data['games']) if predictor_instance else 0}
 
 
@@ -1295,7 +1252,6 @@ class DiscordBot(commands.Bot):
 
     @tasks.loop(minutes=14)
     async def keep_alive(self):
-        """Ping our own /health endpoint every 14 min to prevent Render free tier sleeping."""
         render_url = os.environ.get('RENDER_EXTERNAL_URL', '')
         if not render_url:
             return
@@ -1309,14 +1265,13 @@ class DiscordBot(commands.Bot):
 class MinesCog(commands.Cog):
     def __init__(self, bot: DiscordBot):
         self.bot = bot
-        self.analyzer = ScreenshotAnalyzer(ANTHROPIC_API_KEY)
+        self.analyzer = ScreenshotAnalyzer(GEMINI_API_KEY)  # ← uses Gemini now
 
     @app_commands.command(name="analyze", description="Upload a Bloxflip screenshot to auto-detect grid and get a prediction")
     @app_commands.describe(screenshot="Your Bloxflip Mines screenshot")
     async def slash_analyze(self, interaction: discord.Interaction, screenshot: discord.Attachment):
         await interaction.response.defer()
 
-        # Validate it's an image
         if not screenshot.content_type or not screenshot.content_type.startswith('image/'):
             await interaction.followup.send("❌ Please attach an **image** file (PNG, JPG, etc.)", ephemeral=True)
             return
@@ -1325,7 +1280,6 @@ class MinesCog(commands.Cog):
             await interaction.followup.send("❌ Image too large (max 8MB)", ephemeral=True)
             return
 
-        # Download the image
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(screenshot.url) as resp:
@@ -1334,15 +1288,13 @@ class MinesCog(commands.Cog):
             await interaction.followup.send(f"❌ Failed to download image: {e}", ephemeral=True)
             return
 
-        # Send thinking message
         thinking_embed = discord.Embed(
             title="🔍 Analyzing Screenshot...",
-            description="Reading your Bloxflip grid with AI vision. This takes a few seconds.",
+            description="Reading your Bloxflip grid with Gemini AI. This takes a few seconds.",
             color=discord.Color.orange()
         )
         msg = await interaction.followup.send(embed=thinking_embed)
 
-        # Analyze with Claude vision
         mime = screenshot.content_type.split(';')[0]
         result = await self.analyzer.analyze(image_bytes, mime)
 
@@ -1352,10 +1304,10 @@ class MinesCog(commands.Cog):
                 description=result['error'],
                 color=discord.Color.red()
             )
-            if 'ANTHROPIC_API_KEY' in result['error']:
+            if 'GEMINI_API_KEY' in result['error']:
                 err_embed.add_field(
                     name="Setup Required",
-                    value="Set `ANTHROPIC_API_KEY` environment variable to enable screenshot analysis.",
+                    value="Set `GEMINI_API_KEY` environment variable. Get a free key at https://aistudio.google.com",
                     inline=False
                 )
             await msg.edit(embed=err_embed)
@@ -1369,12 +1321,11 @@ class MinesCog(commands.Cog):
         game_state = result.get('game_state', 'unknown')
         notes = result.get('notes', '')
 
-        # Validate extracted data
         if not tile_count or not mine_count:
             err_embed = discord.Embed(
                 title="⚠️ Could Not Read Grid",
                 description=(
-                    "The AI couldn't confidently detect the tile/mine count from this screenshot.\n\n"
+                    "Gemini couldn't confidently detect the tile/mine count from this screenshot.\n\n"
                     "**Try:**\n"
                     "• Make sure the full Bloxflip Mines grid is visible\n"
                     "• Use a higher quality screenshot\n"
@@ -1390,7 +1341,6 @@ class MinesCog(commands.Cog):
         tile_count = int(tile_count)
         mine_count = int(mine_count)
 
-        # Record bet if we have the amount
         if bet_amount is not None:
             try:
                 bet_float = float(bet_amount)
@@ -1398,7 +1348,6 @@ class MinesCog(commands.Cog):
                 self.bot.predictor.record_bet(
                     interaction.user.id, bet_float, tile_count, mine_count, won
                 )
-                # Update user name
                 uid_str = str(interaction.user.id)
                 if uid_str in self.bot.predictor.data['user_stats']:
                     self.bot.predictor.data['user_stats'][uid_str]['name'] = interaction.user.display_name
@@ -1406,9 +1355,7 @@ class MinesCog(commands.Cog):
             except Exception:
                 pass
 
-        # If game already over, just show what happened
         if game_state in ('won', 'lost') and revealed_mines:
-            # Submit results automatically if we have mine positions
             round_id = str(random.randint(100000, 999999))
             game_data = {
                 'timestamp': datetime.now().isoformat(),
@@ -1437,10 +1384,8 @@ class MinesCog(commands.Cog):
             await msg.edit(embed=result_embed)
             return
 
-        # Active game — run prediction, excluding already-revealed tiles
         prediction = self.bot.predictor.predict_mines(tile_count, mine_count, interaction.user.id)
 
-        # Filter out already-revealed tiles from recommendations
         safe_tiles = [t for t in prediction['safe_tiles'] if t not in revealed_safe and t not in revealed_mines]
         mine_tiles = [t for t in prediction['mine_tiles'] if t not in revealed_safe and t not in revealed_mines]
 
@@ -1701,7 +1646,7 @@ class MinesCog(commands.Cog):
             description="AI-powered mine prediction. Upload screenshots for auto-detection!",
             color=discord.Color.from_rgb(0, 255, 180)
         )
-        embed.add_field(name="📸 /analyze <screenshot>", value="**Best command!** Upload a Bloxflip screenshot — AI reads grid size, mine count, bet, and predicts", inline=False)
+        embed.add_field(name="📸 /analyze <screenshot>", value="**Best command!** Upload a Bloxflip screenshot — Gemini AI reads grid size, mine count, bet, and predicts", inline=False)
         embed.add_field(name="🎲 /predict <tiles> [mines]", value="Manual prediction if you know the grid settings", inline=False)
         embed.add_field(name="✅ /submit <round_id> <mines>", value="Submit actual mine positions after a game to train the AI", inline=False)
         embed.add_field(name="💰 /betlog", value="View your bet history, win rate, and net profit/loss", inline=False)
@@ -1726,12 +1671,10 @@ def main():
     global predictor_instance
     predictor_instance = BloxflipPredictor()
 
-    # FastAPI in background thread
     fastapi_thread = threading.Thread(target=run_fastapi, daemon=True)
     fastapi_thread.start()
     print(f"🌐 Web UI running on http://{HOST}:{PORT}")
 
-    # Discord bot in main thread (asyncio)
     asyncio.run(run_discord(predictor_instance))
 
 
