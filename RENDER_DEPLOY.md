@@ -6,7 +6,7 @@
 - A **GitHub account** (free)
 - A **Render account** at https://render.com (free)
 - Your **Discord bot token**
-- Your **Anthropic API key** (for screenshot analysis) — get one at https://console.anthropic.com
+- Your **GEMINI_API_KEY** (for screenshot analysis) — get one at https://aistudio.google.com/
 
 ---
 
@@ -156,7 +156,7 @@ Render will automatically detect the push and redeploy. Takes about 2 minutes.
 → Make sure the Disk is attached at `/data` and `DATA_DIR=/data` is set
 
 **Screenshot analysis says "API key not set"**
-→ Add `ANTHROPIC_API_KEY` in Render Environment settings and redeploy
+→ Add `GEMINI_API_KEY` in Render Environment settings and redeploy
 
 **Slash commands not showing in Discord**
 → Wait up to 1 hour for Discord to sync, or kick and reinvite the bot
