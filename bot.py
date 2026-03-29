@@ -18,13 +18,18 @@ import base64
 import re
 
 # ============ CONFIGURATION ============
-DISCORD_TOKEN = os.environ.get('DISCORD_TOKEN')
-GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
+DISCORD_TOKEN = os.environ.get('DISCORD_TOKEN', 'YOUR_BOT_TOKEN')
+GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
 PORT = int(os.environ.get('PORT', 8000))
 HOST = os.environ.get('HOST', '0.0.0.0')
 # On Render use persistent disk at /data; locally use current dir
 DATA_DIR = os.environ.get('DATA_DIR') or '.'
-os.makedirs(DATA_DIR, exist_ok=True)
+try:
+    os.makedirs(DATA_DIR, exist_ok=True)
+except Exception:
+    DATA_DIR = '.'
+    os.makedirs(DATA_DIR, exist_ok=True)
+
 
 # ============ PREDICTOR CLASS ============
 class BloxflipPredictor:
@@ -139,7 +144,7 @@ class BloxflipPredictor:
         game['actual_mines'] = actual_mines
         game['completed_at'] = datetime.now().isoformat()
 
-        predicted_mines_set = set(game['predicted_mines'])
+        predicted_mines_set = set(game.get('predicted_mines', []))
         actual_mines_set = set(actual_mines)
 
         correct_predictions = len(predicted_mines_set & actual_mines_set)
@@ -238,12 +243,12 @@ class BloxflipPredictor:
     def get_leaderboard(self, limit=10):
         lb = []
         for uid, stats in self.data['user_stats'].items():
-            if stats['total_predictions'] > 0:
-                avg_acc = sum(stats['accuracy_history']) / len(stats['accuracy_history']) if stats['accuracy_history'] else 0
+            if stats.get('total_predictions', 0) > 0:
+                avg_acc = sum(stats['accuracy_history']) / len(stats['accuracy_history']) if stats.get('accuracy_history') else 0
                 lb.append({
                     'user': stats.get('name', uid),
-                    'predictions': stats['total_predictions'],
-                    'correct': stats['total_correct'],
+                    'predictions': stats.get('total_predictions', 0),
+                    'correct': stats.get('total_correct', 0),
                     'avg_accuracy': round(avg_acc, 1)
                 })
         lb.sort(key=lambda x: x['avg_accuracy'], reverse=True)
@@ -252,7 +257,9 @@ class BloxflipPredictor:
 
 # ============ SCREENSHOT ANALYZER ============
 class ScreenshotAnalyzer:
-    """Uses Google Gemini (free tier) to read a Bloxflip Mines screenshot."""
+    """Uses Google Gemini (free tier) to read a Bloxflip Mines screenshot.
+    GEMINI_MODEL env var can be used to override which model name is called (avoids 404s).
+    """
 
     SYSTEM_PROMPT = """You are an expert at reading Bloxflip Mines game screenshots.
 Bloxflip Mines is a grid-based game where some tiles hide bombs/mines.
@@ -305,24 +312,26 @@ Return ONLY the JSON object, no markdown, no explanation."""
             }
         }
 
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={self.api_key}"
+        # Use configurable model name to avoid hardcoded 404s
+        model_name = os.environ.get('GEMINI_MODEL', 'gemini-1.5-flash')
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={self.api_key}"
 
         async with aiohttp.ClientSession() as session:
-            async with session.post(
-                url,
-                json=payload,
-                headers={"Content-Type": "application/json"},
-                timeout=aiohttp.ClientTimeout(total=30)
-            ) as resp:
+            async with session.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                text = await resp.text()
                 if resp.status != 200:
-                    text = await resp.text()
-                    return {'error': f'Gemini API error {resp.status}: {text[:200]}'}
-                data = await resp.json()
+                    if resp.status == 404 and 'models/' in text:
+                        return {'error': f'Gemini model not found (404). Set env GEMINI_MODEL to a supported model or check API version. Response: {text[:400]}'}
+                    return {'error': f'Gemini API error {resp.status}: {text[:400]}'}
+                try:
+                    data = json.loads(text)
+                except Exception:
+                    return {'error': f'Could not parse Gemini response body: {text[:400]}'}
 
         try:
             raw = data['candidates'][0]['content']['parts'][0]['text'].strip()
         except (KeyError, IndexError):
-            return {'error': 'Unexpected response structure from Gemini API'}
+            return {'error': 'Unexpected response structure from Gemini API', 'raw': json.dumps(data)[:800]}
 
         # Strip markdown fences if present
         raw = re.sub(r'^```[a-z]*\n?', '', raw)
@@ -330,7 +339,7 @@ Return ONLY the JSON object, no markdown, no explanation."""
         try:
             return json.loads(raw)
         except json.JSONDecodeError:
-            return {'error': f'Could not parse Gemini response: {raw[:300]}'}
+            return {'error': f'Could not parse Gemini response: {raw[:300]}', 'raw': raw}
 
 
 # ============ FASTAPI WEB SERVER ============
@@ -347,18 +356,18 @@ HTML_PAGE = r"""<!DOCTYPE html>
 <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Rajdhani:wght@300;400;600&display=swap" rel="stylesheet">
 <style>
   :root {
-    --bg: #080c14;
-    --surface: #0d1421;
-    --surface2: #111b2e;
-    --border: rgba(0,255,180,0.15);
-    --accent: #00ffb4;
-    --accent2: #ff3d71;
-    --accent3: #00b4ff;
-    --text: #c8d8e8;
-    --text-dim: #5a7090;
-    --mine: #ff3d71;
-    --safe: #00ffb4;
-    --glow: 0 0 20px rgba(0,255,180,0.3);
+    --bg: #070506;
+    --surface: #0b0a0a;
+    --surface2: #120f10;
+    --border: rgba(255,40,40,0.14);
+    --accent: #ff3d3d;
+    --accent2: #ff8a8a;
+    --accent3: #ff1f1f;
+    --text: #f2eaea;
+    --text-dim: #b7a8a8;
+    --mine: #ff3d3d;
+    --safe: #ffdede;
+    --glow: 0 0 20px rgba(255,61,113,0.14);
   }
   * { margin:0; padding:0; box-sizing:border-box; }
   body {
@@ -373,8 +382,8 @@ HTML_PAGE = r"""<!DOCTYPE html>
     position:fixed;
     inset:0;
     background:
-      radial-gradient(ellipse 60% 40% at 20% 10%, rgba(0,255,180,0.04) 0%, transparent 60%),
-      radial-gradient(ellipse 50% 50% at 80% 90%, rgba(0,180,255,0.04) 0%, transparent 60%);
+      radial-gradient(ellipse 60% 40% at 20% 10%, rgba(255,61,113,0.02) 0%, transparent 60%),
+      radial-gradient(ellipse 50% 50% at 80% 90%, rgba(255,20,20,0.02) 0%, transparent 60%);
     pointer-events:none;
     z-index:0;
   }
@@ -382,8 +391,8 @@ HTML_PAGE = r"""<!DOCTYPE html>
     position:fixed;
     inset:0;
     background-image:
-      linear-gradient(rgba(0,255,180,0.03) 1px, transparent 1px),
-      linear-gradient(90deg, rgba(0,255,180,0.03) 1px, transparent 1px);
+      linear-gradient(rgba(255,61,61,0.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,61,61,0.03) 1px, transparent 1px);
     background-size: 40px 40px;
     pointer-events:none;
     z-index:0;
@@ -393,10 +402,10 @@ HTML_PAGE = r"""<!DOCTYPE html>
     position: sticky;
     top: 0;
     z-index: 100;
-    background: rgba(8,12,20,0.9);
-    backdrop-filter: blur(20px);
+    background: rgba(8,6,6,0.9);
+    backdrop-filter: blur(10px);
     border-bottom: 1px solid var(--border);
-    padding: 0 40px;
+    padding: 0 24px;
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -411,713 +420,165 @@ HTML_PAGE = r"""<!DOCTYPE html>
     text-shadow: var(--glow);
   }
   .logo span { color: var(--text-dim); }
-  .nav-links { display:flex; gap:30px; }
-  .nav-link {
-    font-size: 0.85rem;
-    font-weight: 600;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-    color: var(--text-dim);
-    cursor:pointer;
-    transition: color 0.2s;
-  }
-  .nav-link:hover, .nav-link.active { color: var(--accent); }
+  .nav-links { display:flex; gap:18px; }
+  .nav-link { font-size:0.85rem; color:var(--text-dim); cursor:pointer; }
 
-  main { position: relative; z-index: 1; max-width: 1300px; margin: 0 auto; padding: 40px 20px 80px; }
+  main { position: relative; z-index: 1; max-width: 1200px; margin: 0 auto; padding: 40px 16px 80px; }
 
-  .hero {
-    text-align: center;
-    padding: 60px 0 50px;
-  }
-  .hero-tag {
-    display: inline-block;
-    font-size: 0.72rem;
-    font-weight: 600;
-    letter-spacing: 0.2em;
-    text-transform: uppercase;
-    color: var(--accent);
-    border: 1px solid var(--accent);
-    padding: 4px 14px;
-    border-radius: 2px;
-    margin-bottom: 20px;
-    box-shadow: var(--glow);
-  }
-  .hero h1 {
-    font-family: 'Orbitron', sans-serif;
-    font-size: clamp(2rem, 5vw, 3.8rem);
-    font-weight: 900;
-    line-height: 1.1;
-    margin-bottom: 16px;
-  }
-  .hero h1 em {
-    font-style: normal;
-    color: var(--accent);
-    text-shadow: var(--glow);
-  }
-  .hero p {
-    color: var(--text-dim);
-    font-size: 1.1rem;
-    max-width: 520px;
-    margin: 0 auto;
-    line-height: 1.6;
-  }
-
-  .stats-row {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 16px;
-    margin-bottom: 50px;
-  }
-  @media(max-width:800px) { .stats-row { grid-template-columns: repeat(2,1fr); } }
-  .stat-card {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 20px;
-    text-align: center;
-    position:relative;
-    overflow:hidden;
-  }
-  .stat-card::before {
-    content:'';
-    position:absolute;
-    top:0; left:0; right:0;
-    height:2px;
-    background: linear-gradient(90deg, transparent, var(--accent), transparent);
-    opacity: 0.6;
-  }
-  .stat-val {
-    font-family: 'Orbitron', sans-serif;
-    font-size: 2rem;
-    font-weight: 700;
-    color: var(--accent);
-    line-height: 1;
-    margin-bottom: 6px;
-  }
-  .stat-label { font-size: 0.78rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-dim); }
-
-  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-bottom: 24px; }
-  @media(max-width:900px){ .two-col { grid-template-columns: 1fr; } }
-
-  .panel {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 28px;
-  }
-  .panel-title {
-    font-family: 'Orbitron', sans-serif;
-    font-size: 0.8rem;
-    font-weight: 700;
-    letter-spacing: 0.15em;
-    text-transform: uppercase;
-    color: var(--accent);
-    margin-bottom: 22px;
-    display:flex;
-    align-items:center;
-    gap: 10px;
-  }
-  .panel-title::after {
-    content:'';
-    flex:1;
-    height:1px;
-    background: var(--border);
-  }
-
-  label { font-size: 0.82rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-dim); display: block; margin-bottom: 6px; }
-  input[type=number], select {
-    width: 100%;
-    background: var(--bg);
-    border: 1px solid rgba(0,255,180,0.2);
-    border-radius: 6px;
-    color: var(--text);
-    font-family: 'Rajdhani', sans-serif;
-    font-size: 1rem;
-    padding: 10px 14px;
-    outline: none;
-    transition: border 0.2s, box-shadow 0.2s;
-    margin-bottom: 16px;
-    appearance: none;
-  }
-  input[type=number]:focus, select:focus {
-    border-color: var(--accent);
-    box-shadow: 0 0 0 3px rgba(0,255,180,0.1);
-  }
-
-  .range-wrap { margin-bottom: 20px; }
-  .range-header { display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; }
-  .range-val {
-    font-family: 'Orbitron', sans-serif;
-    font-size: 1.4rem;
-    font-weight: 700;
-    color: var(--accent);
-  }
-  input[type=range] {
-    width: 100%;
-    appearance: none;
-    height: 4px;
-    background: var(--surface2);
-    border-radius: 4px;
-    outline: none;
-    cursor: pointer;
-  }
-  input[type=range]::-webkit-slider-thumb {
-    appearance: none;
-    width: 18px;
-    height: 18px;
-    background: var(--accent);
-    border-radius: 50%;
-    box-shadow: 0 0 10px rgba(0,255,180,0.5);
-    cursor: pointer;
-    transition: transform 0.15s;
-  }
-  input[type=range]::-webkit-slider-thumb:hover { transform: scale(1.2); }
-
-  .btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-    font-family: 'Orbitron', sans-serif;
-    font-size: 0.8rem;
-    font-weight: 700;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-    padding: 12px 28px;
-    border-radius: 6px;
-    border: none;
-    cursor: pointer;
-    transition: all 0.2s;
-    width: 100%;
-  }
-  .btn-primary {
-    background: var(--accent);
-    color: #000;
-    box-shadow: 0 0 20px rgba(0,255,180,0.3);
-  }
-  .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 4px 30px rgba(0,255,180,0.45); }
-  .btn-primary:active { transform: translateY(0); }
-  .btn-primary:disabled { opacity:0.4; cursor:not-allowed; transform:none; }
-
-  .btn-secondary {
-    background: transparent;
-    color: var(--accent);
-    border: 1px solid var(--accent);
-    box-shadow: inset 0 0 0 0 var(--accent);
-    transition: all 0.25s;
-    margin-top: 10px;
-  }
-  .btn-secondary:hover { background: rgba(0,255,180,0.08); }
+  .panel { background: var(--surface); border:1px solid var(--border); border-radius:12px; padding:20px; }
 
   #grid-container { margin-top: 20px; }
-  .mine-grid {
-    display: grid;
-    gap: 6px;
-    margin-bottom: 20px;
-  }
-  .tile {
-    aspect-ratio: 1;
-    border-radius: 6px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-family: 'Orbitron', sans-serif;
-    font-size: 0.75rem;
-    font-weight: 700;
-    cursor: default;
-    border: 1px solid transparent;
-    transition: transform 0.15s, box-shadow 0.2s;
-    animation: tileIn 0.4s ease both;
-    position: relative;
-    overflow: hidden;
-  }
-  .tile::before {
-    content:'';
-    position:absolute;
-    inset:0;
-    background: linear-gradient(135deg, rgba(255,255,255,0.06) 0%, transparent 60%);
-    pointer-events:none;
-  }
-  @keyframes tileIn {
-    from { opacity:0; transform: scale(0.7); }
-    to   { opacity:1; transform: scale(1); }
-  }
-  .tile-safe {
-    background: rgba(0,255,180,0.1);
-    border-color: rgba(0,255,180,0.35);
-    color: var(--safe);
-    box-shadow: 0 0 10px rgba(0,255,180,0.1);
-  }
-  .tile-mine {
-    background: rgba(255,61,113,0.12);
-    border-color: rgba(255,61,113,0.35);
-    color: var(--mine);
-    box-shadow: 0 0 10px rgba(255,61,113,0.1);
-  }
-  .tile-mine .tile-icon { filter: drop-shadow(0 0 4px rgba(255,61,113,0.6)); }
-  .tile-safe .tile-icon { filter: drop-shadow(0 0 4px rgba(0,255,180,0.5)); }
-  .tile-icon { font-size: 1.1em; }
-  .tile-num { font-size: 0.6em; opacity: 0.6; position:absolute; top:3px; left:4px; }
+  .mine-grid { display: grid; gap: 8px; margin-bottom: 20px; }
+  .tile { aspect-ratio:1; border-radius:8px; display:flex; align-items:center; justify-content:center; cursor:default; transition:transform .12s ease, box-shadow .18s ease; position:relative; }
+  .tile::before { content:''; position:absolute; inset:0; background:linear-gradient(135deg, rgba(255,255,255,0.02), transparent); }
+  @keyframes tileIn { from{opacity:0; transform:scale(.85)} to{opacity:1; transform:scale(1)} }
+  .tile-safe { background: linear-gradient(180deg, rgba(255,220,220,0.03), rgba(255,220,220,0.01)); border:1px solid rgba(255,140,140,0.06); box-shadow:0 6px 18px rgba(255,61,113,0.04); }
+  .tile-mine { background: linear-gradient(180deg, rgba(255,61,61,0.06), rgba(255,20,20,0.02)); border:1px solid rgba(255,61,61,0.18); box-shadow:0 8px 24px rgba(255,61,61,0.05); }
+  .tile-icon { font-size:1.4rem; filter: drop-shadow(0 2px 6px rgba(0,0,0,0.6)); }
 
-  .confidence-section { margin-bottom: 20px; }
-  .conf-label { display:flex; justify-content:space-between; margin-bottom:6px; }
-  .conf-pct {
-    font-family:'Orbitron',sans-serif;
-    font-size: 1.3rem;
-    font-weight:700;
-    color: var(--accent);
-  }
-  .conf-bar-bg {
-    height: 8px;
-    background: var(--surface2);
-    border-radius: 4px;
-    overflow: hidden;
-  }
-  .conf-bar-fill {
-    height:100%;
-    border-radius:4px;
-    background: linear-gradient(90deg, var(--accent3), var(--accent));
-    box-shadow: 0 0 10px rgba(0,255,180,0.4);
-    transition: width 0.8s cubic-bezier(0.22, 1, 0.36, 1);
-    width: 0%;
-  }
+  .legend { display:flex; gap:18px; justify-content:center; margin-top:12px; }
+  .legend-item { display:flex; align-items:center; gap:8px; color:var(--text-dim); }
+  .legend-dot { width:12px; height:12px; border-radius:50%; }
 
-  .legend {
-    display:flex;
-    gap:20px;
-    margin-top: 14px;
-    justify-content:center;
-  }
-  .legend-item { display:flex; align-items:center; gap:6px; font-size:0.82rem; color:var(--text-dim); }
-  .legend-dot { width:10px; height:10px; border-radius:50%; }
-  .legend-dot.safe { background:var(--safe); box-shadow:0 0 6px rgba(0,255,180,0.5); }
-  .legend-dot.mine { background:var(--mine); box-shadow:0 0 6px rgba(255,61,113,0.5); }
-
-  .pred-summary {
-    display:grid;
-    grid-template-columns:1fr 1fr;
-    gap:12px;
-    margin-bottom:20px;
-  }
-  .pred-stat {
-    background: var(--surface2);
-    border-radius: 8px;
-    padding: 12px 16px;
-    text-align:center;
-  }
-  .pred-stat-val { font-family:'Orbitron',sans-serif; font-size:1.6rem; font-weight:700; }
-  .pred-stat-val.safe-color { color: var(--safe); }
-  .pred-stat-val.mine-color { color: var(--mine); }
-  .pred-stat-label { font-size:0.75rem; letter-spacing:0.1em; text-transform:uppercase; color:var(--text-dim); margin-top:2px; }
-
-  .recent-list { display:flex; flex-direction:column; gap:10px; }
-  .recent-item {
-    background: var(--surface2);
-    border-radius:8px;
-    padding:14px 18px;
-    display:flex;
-    justify-content:space-between;
-    align-items:center;
-    border-left: 3px solid var(--accent);
-    animation: slideIn 0.3s ease both;
-  }
-  @keyframes slideIn { from{opacity:0;transform:translateX(-10px)} to{opacity:1;transform:translateX(0)} }
-  .recent-item-info { font-size:0.92rem; }
-  .recent-item-id { font-family:'Orbitron',sans-serif; font-size:0.72rem; color:var(--accent); margin-bottom:3px; }
-  .recent-item-detail { color:var(--text-dim); font-size:0.82rem; }
-  .recent-item-conf {
-    font-family:'Orbitron',sans-serif;
-    font-size:1.1rem;
-    font-weight:700;
-    color:var(--accent);
-  }
-
-  .lb-table { width:100%; border-collapse:collapse; }
-  .lb-table th {
-    font-size:0.72rem;
-    letter-spacing:0.1em;
-    text-transform:uppercase;
-    color:var(--text-dim);
-    padding:8px 12px;
-    text-align:left;
-    border-bottom: 1px solid var(--border);
-  }
-  .lb-table td {
-    padding: 12px;
-    font-size:0.92rem;
-    border-bottom: 1px solid rgba(255,255,255,0.03);
-  }
-  .lb-rank { font-family:'Orbitron',sans-serif; font-weight:700; color:var(--text-dim); }
-  .lb-rank.gold { color:#ffd700; }
-  .lb-rank.silver { color:#c0c0c0; }
-  .lb-rank.bronze { color:#cd7f32; }
-  .lb-acc { font-family:'Orbitron',sans-serif; font-weight:700; color:var(--accent); }
-
-  .section { margin-bottom:28px; }
-  .empty { text-align:center; padding:30px; color:var(--text-dim); font-size:0.9rem; }
-
-  #toast {
-    position:fixed;
-    bottom:30px;
-    left:50%;
-    transform:translateX(-50%) translateY(80px);
-    background:var(--surface);
-    border:1px solid var(--accent);
-    color:var(--text);
-    padding:12px 24px;
-    border-radius:8px;
-    font-size:0.9rem;
-    box-shadow:0 4px 30px rgba(0,0,0,0.4);
-    z-index:999;
-    transition:transform 0.3s cubic-bezier(0.22,1,0.36,1);
-    white-space:nowrap;
-  }
-  #toast.show { transform:translateX(-50%) translateY(0); }
-
-  .spinner {
-    display:inline-block;
-    width:16px;
-    height:16px;
-    border:2px solid rgba(0,0,0,0.3);
-    border-top-color:#000;
-    border-radius:50%;
-    animation:spin 0.6s linear infinite;
-  }
-  @keyframes spin { to { transform:rotate(360deg); } }
-
-  .tabs { display:flex; gap:0; margin-bottom:28px; border:1px solid var(--border); border-radius:8px; overflow:hidden; }
-  .tab {
-    flex:1;
-    padding:12px;
-    text-align:center;
-    font-family:'Orbitron',sans-serif;
-    font-size:0.72rem;
-    font-weight:700;
-    letter-spacing:0.1em;
-    text-transform:uppercase;
-    cursor:pointer;
-    color:var(--text-dim);
-    background:var(--surface);
-    transition:all 0.2s;
-    border:none;
-  }
-  .tab.active { background:rgba(0,255,180,0.1); color:var(--accent); }
-  .tab-panel { display:none; }
-  .tab-panel.active { display:block; }
+  .btn { padding:10px 18px; border-radius:8px; }
 </style>
 </head>
 <body>
 <div class="grid-bg"></div>
-
 <nav>
   <div class="logo">BLOX<span>FLIP</span> · PREDICTOR</div>
   <div class="nav-links">
-    <span class="nav-link active" onclick="scrollTo(0,0)">HOME</span>
+    <span class="nav-link" onclick="scrollTo(0,0)">HOME</span>
     <span class="nav-link" onclick="document.getElementById('predictor-section').scrollIntoView({behavior:'smooth'})">PREDICT</span>
     <span class="nav-link" onclick="document.getElementById('stats-section').scrollIntoView({behavior:'smooth'})">STATS</span>
   </div>
 </nav>
-
 <main>
-  <section class="hero">
-    <div class="hero-tag">⚡ AI-Powered</div>
-    <h1>Mine <em>Predictor</em><br>Intelligence</h1>
-    <p>Advanced pattern recognition trained on game history. Identify safe tiles with data-driven confidence.</p>
+  <section style="text-align:center;margin-bottom:18px">
+    <h1 style="font-family:Orbitron, sans-serif;color:var(--accent)">Mine Predictor</h1>
+    <p style="color:var(--text-dim)">Data-driven predictions — visual grid and better UX</p>
   </section>
 
-  <div class="stats-row" id="stats-section">
-    <div class="stat-card">
-      <div class="stat-val" id="s-total">—</div>
-      <div class="stat-label">Total Predictions</div>
-    </div>
-    <div class="stat-card">
-      <div class="stat-val" id="s-acc">—</div>
-      <div class="stat-label">Avg Accuracy</div>
-    </div>
-    <div class="stat-card">
-      <div class="stat-val" id="s-users">—</div>
-      <div class="stat-label">Active Users</div>
-    </div>
-    <div class="stat-card">
-      <div class="stat-val" id="s-completed">—</div>
-      <div class="stat-label">Completed Games</div>
-    </div>
-  </div>
-
-  <div class="tabs">
-    <button class="tab active" onclick="switchTab('predictor')">🎲 Predictor</button>
-    <button class="tab" onclick="switchTab('recent')">📋 Recent</button>
-    <button class="tab" onclick="switchTab('leaderboard')">🏆 Leaderboard</button>
-  </div>
-
-  <div class="tab-panel active" id="tab-predictor" id="predictor-section">
-    <div class="two-col" id="predictor-section">
-      <div class="panel">
-        <div class="panel-title">Configure Prediction</div>
-
-        <div class="range-wrap">
-          <div class="range-header">
-            <label style="margin:0">Total Tiles</label>
-            <div class="range-val" id="tiles-val">16</div>
-          </div>
-          <input type="range" id="tiles-slider" min="4" max="25" value="16" oninput="updateSliders()">
-          <div style="display:flex;justify-content:space-between;font-size:0.72rem;color:var(--text-dim);margin-top:4px">
-            <span>4</span><span>25</span>
-          </div>
-        </div>
-
-        <div class="range-wrap">
-          <div class="range-header">
-            <label style="margin:0">Mine Count</label>
-            <div class="range-val" id="mines-val">8</div>
-          </div>
-          <input type="range" id="mines-slider" min="1" max="24" value="8" oninput="updateSliders()">
-          <div style="display:flex;justify-content:space-between;font-size:0.72rem;color:var(--text-dim);margin-top:4px">
-            <span>1</span><span id="mines-max-label">24</span>
-          </div>
-        </div>
-
-        <button class="btn btn-primary" id="predict-btn" onclick="runPredict()">
-          <span id="btn-text">ANALYZE &amp; PREDICT</span>
-        </button>
-
-        <div id="submit-section" style="display:none;margin-top:24px;padding-top:20px;border-top:1px solid var(--border)">
-          <div class="panel-title">Submit Results</div>
-          <label>Round ID</label>
-          <input type="text" id="submit-round-id" placeholder="auto-filled" style="background:var(--bg);border:1px solid rgba(0,255,180,0.2);border-radius:6px;color:var(--text);font-family:'Rajdhani',sans-serif;font-size:1rem;padding:10px 14px;width:100%;margin-bottom:12px;outline:none">
-          <label>Actual Mine Positions (space-separated)</label>
-          <input type="text" id="submit-mines" placeholder="e.g. 3 7 12 15" style="background:var(--bg);border:1px solid rgba(0,255,180,0.2);border-radius:6px;color:var(--text);font-family:'Rajdhani',sans-serif;font-size:1rem;padding:10px 14px;width:100%;margin-bottom:12px;outline:none">
-          <button class="btn btn-secondary" onclick="submitResults()">SUBMIT RESULTS</button>
-        </div>
-      </div>
-
-      <div class="panel">
-        <div class="panel-title">Prediction Output</div>
-        <div id="prediction-output">
-          <div class="empty">Configure settings and click ANALYZE to see predictions</div>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <div class="tab-panel" id="tab-recent">
+  <div style="display:grid;grid-template-columns:1fr 420px;gap:20px;align-items:start">
     <div class="panel">
-      <div class="panel-title">Recent Predictions</div>
-      <div id="recent-list" class="recent-list">
-        <div class="empty">No predictions yet</div>
+      <div style="display:flex;gap:12px;align-items:center;margin-bottom:12px">
+        <div style="flex:1">
+          <label style="font-size:0.82rem;color:var(--text-dim)">Total Tiles</label>
+          <input id="tiles-slider" type="range" min="4" max="25" value="16" oninput="updateSliders()" style="width:100%">
+        </div>
+        <div style="width:120px">
+          <label style="font-size:0.82rem;color:var(--text-dim)">Mines</label>
+          <input id="mines-slider" type="range" min="1" max="24" value="8" oninput="updateSliders()" style="width:100%">
+        </div>
       </div>
+      <button class="btn" id="predict-btn" onclick="runPredict()" style="background:var(--accent);color:#fff;width:100%">ANALYZE & PREDICT</button>
+
+      <div id="submit-section" style="display:none;margin-top:18px">
+        <label style="font-size:0.82rem;color:var(--text-dim)">Round ID</label>
+        <input id="submit-round-id" type="text" style="width:100%;padding:8px;margin-bottom:8px;background:transparent;border:1px solid var(--border);color:var(--text)">
+        <label style="font-size:0.82rem;color:var(--text-dim)">Actual Mine Positions</label>
+        <input id="submit-mines" type="text" placeholder="e.g. 3 7 12" style="width:100%;padding:8px;margin-bottom:8px;background:transparent;border:1px solid var(--border);color:var(--text)">
+        <button class="btn" onclick="submitResults()" style="border:1px solid var(--border);background:transparent;color:var(--accent)">SUBMIT RESULTS</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div id="prediction-output"><div style="color:var(--text-dim)">Configure settings and click ANALYZE to see predictions</div></div>
     </div>
   </div>
 
-  <div class="tab-panel" id="tab-leaderboard">
-    <div class="panel">
-      <div class="panel-title">Leaderboard</div>
-      <div id="lb-content">
-        <div class="empty">No submissions yet</div>
-      </div>
+  <div style="margin-top:26px" id="stats-section">
+    <div style="display:flex;gap:12px">
+      <div style="flex:1" class="panel">Total Predictions<br><strong id="s-total">—</strong></div>
+      <div style="width:220px" class="panel">Avg Accuracy<br><strong id="s-acc">—</strong></div>
     </div>
   </div>
 </main>
 
-<div id="toast"></div>
+<div id="toast" style="position:fixed;left:50%;bottom:30px;transform:translateX(-50%);background:var(--surface);padding:10px 16px;border-radius:8px;border:1px solid var(--border);display:none"></div>
 
 <script>
 let currentRoundId = null;
 let currentPrediction = null;
 
-function switchTab(name) {
-  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
-  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-  document.getElementById('tab-' + name).classList.add('active');
-  event.target.classList.add('active');
-  if (name === 'recent') loadRecent();
-  if (name === 'leaderboard') loadLeaderboard();
-}
-
-function updateSliders() {
+function updateSliders(){
   const tiles = parseInt(document.getElementById('tiles-slider').value);
   const minesSlider = document.getElementById('mines-slider');
-  const maxMines = tiles - 1;
+  const maxMines = tiles-1;
   minesSlider.max = maxMines;
-  if (parseInt(minesSlider.value) > maxMines) minesSlider.value = maxMines;
-  document.getElementById('tiles-val').textContent = tiles;
-  document.getElementById('mines-val').textContent = minesSlider.value;
-  document.getElementById('mines-max-label').textContent = maxMines;
+  if(parseInt(minesSlider.value)>maxMines) minesSlider.value = maxMines;
 }
 
-async function runPredict() {
+async function runPredict(){
   const tileAmt = parseInt(document.getElementById('tiles-slider').value);
   const mineCount = parseInt(document.getElementById('mines-slider').value);
   const btn = document.getElementById('predict-btn');
-  const btnText = document.getElementById('btn-text');
-
-  btn.disabled = true;
-  btnText.innerHTML = '<span class="spinner"></span> ANALYZING...';
-
-  try {
+  btn.disabled=true; btn.textContent='ANALYZING...';
+  try{
     const res = await fetch(`/api/predict?tiles=${tileAmt}&mines=${mineCount}`);
-    if (!res.ok) throw new Error('API error');
+    if(!res.ok) throw new Error('API error');
     const data = await res.json();
-    currentRoundId = data.round_id;
-    currentPrediction = data;
+    currentRoundId = data.round_id; currentPrediction = data;
     renderPrediction(data, tileAmt);
-    document.getElementById('submit-section').style.display = 'block';
+    document.getElementById('submit-section').style.display='block';
     document.getElementById('submit-round-id').value = data.round_id;
     showToast('✅ Prediction generated!');
-  } catch(e) {
-    showToast('❌ Error generating prediction');
-  } finally {
-    btn.disabled = false;
-    btnText.textContent = 'ANALYZE & PREDICT';
-  }
+  }catch(e){ showToast('❌ Error generating prediction'); }
+  finally{ btn.disabled=false; btn.textContent='ANALYZE & PREDICT'; }
 }
 
-function renderPrediction(data, tileAmt) {
+function renderPrediction(data, tileAmt){
   const cols = Math.ceil(Math.sqrt(tileAmt));
-  const conf = Math.round(data.confidence * 100);
-
+  const conf = Math.round(data.confidence*100);
   const html = `
-    <div class="confidence-section">
-      <div class="conf-label">
-        <span style="font-size:0.82rem;letter-spacing:0.08em;text-transform:uppercase;color:var(--text-dim)">Confidence Score</span>
-        <span class="conf-pct">${conf}%</span>
-      </div>
-      <div class="conf-bar-bg">
-        <div class="conf-bar-fill" id="conf-fill" style="width:0%"></div>
-      </div>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+      <div style="font-size:0.92rem;color:var(--text-dim)">Confidence</div>
+      <div style="font-weight:700;color:var(--accent)">${conf}%</div>
     </div>
-
-    <div class="pred-summary">
-      <div class="pred-stat">
-        <div class="pred-stat-val safe-color">${data.safe_tiles.length}</div>
-        <div class="pred-stat-label">Safe Tiles</div>
-      </div>
-      <div class="pred-stat">
-        <div class="pred-stat-val mine-color">${data.mine_tiles.length}</div>
-        <div class="pred-stat-label">Mine Tiles</div>
-      </div>
-    </div>
-
     <div id="grid-container">
       <div class="mine-grid" style="grid-template-columns:repeat(${cols},1fr)">
         ${Array.from({length:tileAmt},(_,i)=>{
-          const n = i+1;
-          const isMine = data.mine_tiles.includes(n);
-          const risk = data.risk_scores[String(n)] || 0;
-          const delay = (i * 20) + 'ms';
-          return `<div class="tile ${isMine?'tile-mine':'tile-safe'}" style="animation-delay:${delay}" title="Tile ${n} | Risk: ${Math.round(risk*100)}%">
-            <span class="tile-num">${n}</span>
-            <span class="tile-icon">${isMine?'💣':'✅'}</span>
-          </div>`;
+          const n=i+1; const isMine=data.mine_tiles.includes(n); const risk=data.risk_scores[String(n)]||0; const delay=(i*18)+'ms';
+          return `<div class="tile ${isMine?'tile-mine':'tile-safe'}" style="animation:tileIn .35s ease both;animation-delay:${delay}" title="Tile ${n} | Risk: ${Math.round(risk*100)}%"><span class="tile-icon">${isMine?'💣':'•'}</span></div>`;
         }).join('')}
       </div>
     </div>
-
     <div class="legend">
-      <div class="legend-item"><div class="legend-dot safe"></div> Safe</div>
-      <div class="legend-item"><div class="legend-dot mine"></div> Mine</div>
+      <div class="legend-item"><div class="legend-dot" style="background:var(--safe)"></div> Safe</div>
+      <div class="legend-item"><div class="legend-dot" style="background:var(--mine)"></div> Mine</div>
     </div>
-    <div style="margin-top:12px;font-size:0.8rem;color:var(--text-dim);text-align:center">Round ID: <span style="color:var(--accent);font-family:'Orbitron',sans-serif">${data.round_id}</span></div>
+    <div style="margin-top:12px;font-size:0.82rem;color:var(--text-dim)">Round ID: <strong style="color:var(--accent)">${data.round_id}</strong></div>
   `;
-
   document.getElementById('prediction-output').innerHTML = html;
-  setTimeout(() => {
-    const fill = document.getElementById('conf-fill');
-    if (fill) fill.style.width = conf + '%';
-  }, 100);
 }
 
-async function submitResults() {
+async function submitResults(){
   const roundId = document.getElementById('submit-round-id').value.trim();
   const minesStr = document.getElementById('submit-mines').value.trim();
-  if (!roundId || !minesStr) { showToast('❌ Fill in both fields'); return; }
-
-  const mines = minesStr.split(/[\s,]+/).map(Number).filter(n => n > 0);
-  if (!mines.length) { showToast('❌ Invalid mine positions'); return; }
-
-  try {
-    const res = await fetch('/api/submit', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({round_id: roundId, mines, user_id: 'web_user'})
-    });
+  if(!roundId || !minesStr){ showToast('❌ Fill in both fields'); return; }
+  const mines = minesStr.split(/[,\s]+/).map(Number).filter(n=>n>0);
+  if(!mines.length){ showToast('❌ Invalid mine positions'); return; }
+  try{
+    const res = await fetch('/api/submit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({round_id:roundId,mines,user_id:'web_user'})});
     const data = await res.json();
-    if (data.error) { showToast('❌ ' + data.error); return; }
+    if(data.error){ showToast('❌ '+data.error); return; }
     showToast(`✅ ${data.correct}/${data.total} correct — ${data.accuracy.toFixed(1)}% accuracy!`);
     loadStats();
-  } catch(e) {
-    showToast('❌ Submission failed');
-  }
+  }catch(e){ showToast('❌ Submission failed'); }
 }
 
-async function loadStats() {
-  try {
+async function loadStats(){
+  try{
     const res = await fetch('/api/stats');
     const data = await res.json();
     document.getElementById('s-total').textContent = data.total_predictions;
     document.getElementById('s-acc').textContent = data.accuracy_rate + '%';
-    document.getElementById('s-users').textContent = data.active_users;
-    document.getElementById('s-completed').textContent = data.completed_games;
-  } catch(e) {}
+  }catch(e){}
 }
 
-async function loadRecent() {
-  try {
-    const res = await fetch('/api/stats');
-    const data = await res.json();
-    const el = document.getElementById('recent-list');
-    if (!data.recent_predictions || !data.recent_predictions.length) {
-      el.innerHTML = '<div class="empty">No predictions yet — use the Predictor tab!</div>';
-      return;
-    }
-    el.innerHTML = data.recent_predictions.map((p,i) => `
-      <div class="recent-item" style="animation-delay:${i*50}ms">
-        <div class="recent-item-info">
-          <div class="recent-item-id">ROUND #${p.round_id}</div>
-          <div class="recent-item-detail">${p.tile_amt || '?'} tiles · ${p.mine_count} mines · ${p.safe_count} safe</div>
-          <div class="recent-item-detail" style="font-size:0.75rem;margin-top:2px;color:var(--text-dim)">${p.timestamp ? new Date(p.timestamp).toLocaleString() : ''}</div>
-        </div>
-        <div class="recent-item-conf">${p.confidence}%</div>
-      </div>
-    `).join('');
-  } catch(e) {}
-}
+function showToast(msg){ const t=document.getElementById('toast'); t.textContent=msg; t.style.display='block'; setTimeout(()=>t.style.display='none',3000); }
 
-async function loadLeaderboard() {
-  try {
-    const res = await fetch('/api/leaderboard');
-    const data = await res.json();
-    const el = document.getElementById('lb-content');
-    if (!data.leaderboard || !data.leaderboard.length) {
-      el.innerHTML = '<div class="empty">No submissions yet! Submit round results to appear here.</div>';
-      return;
-    }
-    const rankClass = i => i===0?'gold':i===1?'silver':i===2?'bronze':'';
-    el.innerHTML = `<table class="lb-table">
-      <thead><tr><th>#</th><th>User</th><th>Predictions</th><th>Correct</th><th>Avg Accuracy</th></tr></thead>
-      <tbody>${data.leaderboard.map((u,i) => `
-        <tr>
-          <td><span class="lb-rank ${rankClass(i)}">${i+1}</span></td>
-          <td>${u.user}</td>
-          <td>${u.predictions}</td>
-          <td>${u.correct}</td>
-          <td><span class="lb-acc">${u.avg_accuracy}%</span></td>
-        </tr>`).join('')}
-      </tbody>
-    </table>`;
-  } catch(e) {}
-}
-
-function showToast(msg) {
-  const t = document.getElementById('toast');
-  t.textContent = msg;
-  t.classList.add('show');
-  setTimeout(() => t.classList.remove('show'), 3000);
-}
-
-updateSliders();
-loadStats();
-setInterval(loadStats, 10000);
+updateSliders(); loadStats(); setInterval(loadStats,10000);
 </script>
 </body>
 </html>
@@ -1208,10 +669,17 @@ async def api_submit(body: dict):
 
     round_id = body.get('round_id', '').strip()
     mines = body.get('mines', [])
+    # Support alternate submission styles: status='win'|'lost'|'ss' with revealed_mines
+    status = (body.get('status') or body.get('outcome') or '').lower()
+    if not mines and 'revealed_mines' in body:
+        mines = body.get('revealed_mines', [])
+    if not mines and status in ('win', 'won', 'lost', 'lose', 'ss'):
+        mines = body.get('revealed_mines', [])
+
     user_id = body.get('user_id', 'web_user')
 
     if not round_id or not mines:
-        return JSONResponse(content={'error': 'Missing round_id or mines'}, status_code=400)
+        return JSONResponse(content={'error': 'Missing round_id or mines (or provide revealed_mines/status)'}, status_code=400)
 
     try:
         mines = [int(m) for m in mines]
@@ -1415,7 +883,7 @@ class MinesCog(commands.Cog):
                 f"**Round ID:** `{round_id}`\n"
                 f"**Grid:** {tile_count} tiles · **Mines:** {mine_count}"
             ),
-            color=discord.Color.from_rgb(0, 255, 180),
+            color=discord.Color.from_rgb(255, 61, 61),
             timestamp=datetime.now()
         )
 
@@ -1531,7 +999,7 @@ class MinesCog(commands.Cog):
                 f"**Round ID:** `{round_id}`\n"
                 f"**Tiles:** {tile_amount} · **Mines:** {prediction['mine_count']}"
             ),
-            color=discord.Color.from_rgb(0, 255, 180),
+            color=discord.Color.from_rgb(255,61,61),
             timestamp=datetime.now()
         )
 
@@ -1601,7 +1069,7 @@ class MinesCog(commands.Cog):
         user_id = str(interaction.user.id)
         stats = self.bot.predictor.data['user_stats'].get(user_id)
 
-        if not stats or stats['total_predictions'] == 0:
+        if not stats or stats.get('total_predictions', 0) == 0:
             embed = discord.Embed(
                 title="📊 Your Statistics",
                 description="You haven't submitted any results yet!\nUse `/predict` then `/submit` to get started.",
@@ -1610,11 +1078,11 @@ class MinesCog(commands.Cog):
             await interaction.followup.send(embed=embed)
             return
 
-        avg_acc = sum(stats['accuracy_history']) / len(stats['accuracy_history']) if stats['accuracy_history'] else 0
+        avg_acc = sum(stats['accuracy_history']) / len(stats['accuracy_history']) if stats.get('accuracy_history') else 0
 
         embed = discord.Embed(
             title=f"📊 {interaction.user.display_name}'s Stats",
-            color=discord.Color.from_rgb(0, 180, 255)
+            color=discord.Color.from_rgb(255,180,180)
         )
         embed.add_field(name="Total Predictions", value=str(stats['total_predictions']), inline=True)
         embed.add_field(name="Total Correct", value=str(stats['total_correct']), inline=True)
@@ -1644,7 +1112,7 @@ class MinesCog(commands.Cog):
         embed = discord.Embed(
             title="🎲 Bloxflip Mines Predictor",
             description="AI-powered mine prediction. Upload screenshots for auto-detection!",
-            color=discord.Color.from_rgb(0, 255, 180)
+            color=discord.Color.from_rgb(255,61,61)
         )
         embed.add_field(name="📸 /analyze <screenshot>", value="**Best command!** Upload a Bloxflip screenshot — Gemini AI reads grid size, mine count, bet, and predicts", inline=False)
         embed.add_field(name="🎲 /predict <tiles> [mines]", value="Manual prediction if you know the grid settings", inline=False)
