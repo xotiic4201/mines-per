@@ -38,7 +38,6 @@ text
 - Discord Bot Token
 
 ### Installation
-```bash
 git clone https://github.com/YOUR_USERNAME/bloxflip-mines-predictor.git
 cd bloxflip-mines-predictor
 pip install -r requirements.txt
@@ -93,11 +92,11 @@ Made with ❤️ for Bloxflip players
 
 text
 
----
+
 
 ## 🎯 **Simple GitHub Bio**
 
-```markdown
+
 # 👋 Hi, I'm [Your Name]
 
 ### 🎲 Discord Bot Developer
