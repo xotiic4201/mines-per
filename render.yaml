@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: bloxflip-mines-predictor
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    plan: free
+    envVars:
+      - key: DISCORD_TOKEN
+        sync: false        # You set this manually in Render dashboard
+      - key: ANTHROPIC_API_KEY
+        sync: false        # You set this manually in Render dashboard
+      - key: HOST
+        value: 0.0.0.0
+      - key: DATA_DIR
+        value: /data       # Persistent disk mount path
+    disk:
+      name: bloxflip-data
+      mountPath: /data
+      sizeGB: 1
