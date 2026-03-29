@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: bloxflip-mines-predictor
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: PORT
+        value: 8000
