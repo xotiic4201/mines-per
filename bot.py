@@ -342,6 +342,61 @@ Return ONLY the JSON object, no markdown, no explanation."""
             return {'error': f'Could not parse Gemini response: {raw[:300]}', 'raw': raw}
 
 
+async def discover_gemini_model(api_key: str) -> Optional[str]:
+    """Attempt to discover a usable Gemini model via the ListModels endpoint.
+    If `GEMINI_MODEL` is already set in env, it is returned unchanged. Otherwise
+    this queries the models list and picks a sensible candidate (preferring
+    names containing 'gemini' or 'bison'). The chosen model name (without the
+    leading 'models/' prefix) is written back into `os.environ['GEMINI_MODEL']`.
+    """
+    if not api_key:
+        return None
+
+    existing = os.environ.get('GEMINI_MODEL')
+    if existing:
+        print(f"Using GEMINI_MODEL from env: {existing}")
+        return existing
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                text = await resp.text()
+                if resp.status != 200:
+                    print(f"Could not list Gemini models: {resp.status} {text[:200]}")
+                    return None
+                data = json.loads(text)
+
+        models = data.get('models') or []
+        candidates = []
+        for m in models:
+            if isinstance(m, dict):
+                name = m.get('name') or m.get('model') or ''
+            else:
+                name = str(m)
+            if name.startswith('models/'):
+                name = name.split('/', 1)[1]
+            if name:
+                candidates.append(name)
+
+        # Prefer obvious Gemini/bison/chat models, otherwise pick first
+        for keyword in ('gemini', 'bison', 'chat', 'gpt'):
+            for c in candidates:
+                if keyword in c.lower():
+                    os.environ['GEMINI_MODEL'] = c
+                    print(f"Selected Gemini model: {c}")
+                    return c
+
+        if candidates:
+            os.environ['GEMINI_MODEL'] = candidates[0]
+            print(f"Selected Gemini model: {candidates[0]}")
+            return candidates[0]
+
+    except Exception as e:
+        print("Error discovering Gemini models:", e)
+    return None
+
+
 # ============ FASTAPI WEB SERVER ============
 app = FastAPI(title="Bloxflip Mines Predictor")
 predictor_instance: Optional[BloxflipPredictor] = None
@@ -460,7 +515,12 @@ HTML_PAGE = r"""<!DOCTYPE html>
   </section>
 
   <div style="display:grid;grid-template-columns:1fr 420px;gap:20px;align-items:start">
-    <div class="panel">
+        <div class="panel">
+            <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px">
+                <input id="username-input" placeholder="Enter username" style="flex:1;padding:8px;border-radius:6px;border:1px solid var(--border);background:transparent;color:var(--text)" />
+                <button class="btn" onclick="setUsername()" style="background:var(--accent);color:#fff">Set</button>
+            </div>
+            <div style="font-size:0.85rem;color:var(--text-dim);margin-bottom:12px">Signed in as <strong id="current-username">web_user</strong></div>
       <div style="display:flex;gap:12px;align-items:center;margin-bottom:12px">
         <div style="flex:1">
           <label style="font-size:0.82rem;color:var(--text-dim)">Total Tiles</label>
@@ -510,12 +570,13 @@ function updateSliders(){
 }
 
 async function runPredict(){
-  const tileAmt = parseInt(document.getElementById('tiles-slider').value);
+    const tileAmt = parseInt(document.getElementById('tiles-slider').value);
   const mineCount = parseInt(document.getElementById('mines-slider').value);
   const btn = document.getElementById('predict-btn');
   btn.disabled=true; btn.textContent='ANALYZING...';
   try{
-    const res = await fetch(`/api/predict?tiles=${tileAmt}&mines=${mineCount}`);
+        const username = localStorage.getItem('bf_username') || 'web_user';
+        const res = await fetch(`/api/predict?tiles=${tileAmt}&mines=${mineCount}&user=${encodeURIComponent(username)}`);
     if(!res.ok) throw new Error('API error');
     const data = await res.json();
     currentRoundId = data.round_id; currentPrediction = data;
@@ -559,7 +620,8 @@ async function submitResults(){
   const mines = minesStr.split(/[,\s]+/).map(Number).filter(n=>n>0);
   if(!mines.length){ showToast('❌ Invalid mine positions'); return; }
   try{
-    const res = await fetch('/api/submit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({round_id:roundId,mines,user_id:'web_user'})});
+    const username = localStorage.getItem('bf_username') || 'web_user';
+    const res = await fetch('/api/submit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({round_id:roundId,mines,user_id:username})});
     const data = await res.json();
     if(data.error){ showToast('❌ '+data.error); return; }
     showToast(`✅ ${data.correct}/${data.total} correct — ${data.accuracy.toFixed(1)}% accuracy!`);
@@ -578,6 +640,22 @@ async function loadStats(){
 
 function showToast(msg){ const t=document.getElementById('toast'); t.textContent=msg; t.style.display='block'; setTimeout(()=>t.style.display='none',3000); }
 
+// Username helpers
+function setUsername(){
+    const v = document.getElementById('username-input').value.trim();
+    if(!v){ showToast('❌ Enter a username'); return; }
+    localStorage.setItem('bf_username', v);
+    document.getElementById('current-username').textContent = v;
+    showToast('✅ Username set');
+}
+
+function loadUsername(){
+    const v = localStorage.getItem('bf_username') || 'web_user';
+    document.getElementById('current-username').textContent = v;
+    document.getElementById('username-input').value = v === 'web_user' ? '' : v;
+}
+
+loadUsername();
 updateSliders(); loadStats(); setInterval(loadStats,10000);
 </script>
 </body>
@@ -629,7 +707,7 @@ async def get_stats():
 
 
 @app.get("/api/predict")
-async def api_predict(tiles: int = 16, mines: int = None):
+async def api_predict(tiles: int = 16, mines: int = None, user: Optional[str] = 'web_user'):
     if not predictor_instance:
         return JSONResponse(content={'error': 'Not ready'}, status_code=503)
 
@@ -639,13 +717,13 @@ async def api_predict(tiles: int = 16, mines: int = None):
     if mines is not None and (mines < 1 or mines >= tiles):
         return JSONResponse(content={'error': f'mines must be 1–{tiles-1}'}, status_code=400)
 
-    prediction = predictor_instance.predict_mines(tiles, mines, user_id='web_user')
+    prediction = predictor_instance.predict_mines(tiles, mines, user_id=user)
     round_id = str(random.randint(100000, 999999))
 
     game_data = {
         'timestamp': datetime.now().isoformat(),
-        'user_id': 'web_user',
-        'user_name': 'Web User',
+        'user_id': user,
+        'user_name': user,
         'tile_amt': tiles,
         'round_id': round_id,
         'predicted_safe': prediction['safe_tiles'],
@@ -1137,6 +1215,15 @@ async def run_discord(predictor: BloxflipPredictor):
 
 def main():
     global predictor_instance
+    # Attempt to auto-discover a Gemini model if API key is present and no model set
+    if GEMINI_API_KEY and not os.environ.get('GEMINI_MODEL'):
+        try:
+            discovered = asyncio.run(discover_gemini_model(GEMINI_API_KEY))
+            if discovered:
+                print(f"Using discovered Gemini model: {discovered}")
+        except Exception as e:
+            print("Gemini model discovery failed:", e)
+
     predictor_instance = BloxflipPredictor()
 
     fastapi_thread = threading.Thread(target=run_fastapi, daemon=True)
