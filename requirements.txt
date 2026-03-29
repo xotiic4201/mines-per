@@ -1,4 +1,0 @@
-discord.py
-fastapi
-uvicorn
-python-multipart
