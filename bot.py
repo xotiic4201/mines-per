@@ -23,7 +23,7 @@ GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 PORT = int(os.environ.get('PORT', 8000))
 HOST = os.environ.get('HOST', '0.0.0.0')
 # On Render use persistent disk at /data; locally use current dir
-DATA_DIR = os.environ.get('DATA_DIR')
+DATA_DIR = os.environ.get('DATA_DIR') or '.'
 os.makedirs(DATA_DIR, exist_ok=True)
 
 # ============ PREDICTOR CLASS ============
